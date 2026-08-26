@@ -23,7 +23,7 @@ RUN_HOUR = options.get("run_hour", "12")
 RUN_MINUTE = options.get("run_minute", "00")
 
 # Home Assistantin sisäinen osoite add-on ympäristössä
-HA_WS_URL = "ws://homeassistant:8123/api/websocket"
+HA_WS_URL = "ws://supervisor/core/api/websocket"
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 
 # Keycloak login asetukset
