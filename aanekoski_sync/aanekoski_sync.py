@@ -31,12 +31,16 @@ LOGIN_START_URL = "https://aanekoskenenergia.ecoreaction.fi/online/tracking"
 ELEC_MP = "KAYTTOPAIKKATUNNUS"
 
 
+import base64
+import hashlib
+import secrets
+import urllib.parse
+
 class FormParser(HTMLParser):
-    """Parsii Keycloak-kirjautumislomakkeen action-URL:n ja piilotetut kentät."""
+    """Parsii Keycloak-kirjautumislomakkeen action-URL:n."""
     def __init__(self):
         super().__init__()
         self.action_url = None
-        self.hidden_fields = {}
         self._in_form = False
 
     def handle_starttag(self, tag, attrs):
@@ -44,57 +48,107 @@ class FormParser(HTMLParser):
         if tag == "form" and attrs_dict.get("id") == "kc-form-login":
             self._in_form = True
             self.action_url = attrs_dict.get("action")
-        if self._in_form and tag == "input" and attrs_dict.get("type") == "hidden":
-            name = attrs_dict.get("name")
-            value = attrs_dict.get("value", "")
-            if name:
-                self.hidden_fields[name] = value
 
+def generate_pkce():
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode('ascii')).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
+    return verifier, challenge
 
 def fetch_api_data():
-    """Kirjautuu requests-kirjastolla ja hakee kulutusdata API:sta."""
-    print("Kirjaudutaan Äänekosken Energian portaaliin...")
+    """Kirjautuu OIDC PKCE -vuolla ja hakee kulutusdata API:sta."""
+    print("Kirjaudutaan Äänekosken Energian portaaliin OIDC PKCE -kirjautumisella...")
     
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
     
-    # 1. Hae kirjautumissivu (seuraa redirectit Keycloakiin)
-    resp = session.get(LOGIN_START_URL, timeout=30)
+    verifier, challenge = generate_pkce()
+    state = secrets.token_urlsafe(16)
+    nonce = secrets.token_urlsafe(16)
+    
+    redirect_uri = "https://aanekoskenenergia.ecoreaction.fi/online/tracking"
+    client_id = "ecoreaction-ui-online"
+    
+    auth_url = (
+        f"https://login.ecoreaction.fi/auth/realms/AanekoskenEnergia/protocol/openid-connect/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&scope=openid"
+        f"&state={state}"
+        f"&nonce={nonce}"
+        f"&code_challenge={challenge}"
+        f"&code_challenge_method=S256"
+        f"&response_mode=fragment"
+    )
+    
+    # 1. Hae kirjautumissivu (Keycloak)
+    resp = session.get(auth_url, timeout=30)
     if resp.status_code != 200:
         print(f"Virhe kirjautumissivun haussa: {resp.status_code}")
         return None
     
-    # 2. Parsitaan lomakkeen action URL ja piilotetut kentät
+    # 2. Parsitaan lomakkeen action URL
     parser = FormParser()
     parser.feed(resp.text)
     
     if not parser.action_url:
-        print("Kirjautumislomaketta ei löytynyt sivulta!")
-        print(f"Sivun URL: {resp.url}")
-        print(f"Sivun alku: {resp.text[:500]}")
+        print("Kirjautumislomaketta ei löytynyt Keycloak-sivulta!")
         return None
-    
-    print(f"Keycloak action URL löytyi: {parser.action_url[:80]}...")
-    
+        
     # 3. Lähetä tunnukset
     login_data = {
         "username": EMAIL,
         "password": PASSWORD,
-        **parser.hidden_fields
+        "credentialId": ""
     }
     
-    resp2 = session.post(parser.action_url, data=login_data, timeout=30)
+    resp2 = session.post(parser.action_url, data=login_data, allow_redirects=False, timeout=30)
     
-    # Tarkista kirjautuminen
-    if "login" in resp2.url.lower() and "error" in resp2.text.lower():
-        print("VIRHE: Kirjautuminen epäonnistui! Tarkista sähköposti ja salasana.")
+    # 4. Tarkista uudelleenohjaus (joka sisältää koodin)
+    location = resp2.headers.get("Location")
+    if not location:
+        print("VIRHE: Kirjautuminen epäonnistui tai ei uudelleenohjausta!")
+        if "error" in resp2.text.lower():
+            print("Väärä sähköposti tai salasana?")
         return None
     
-    print(f"Kirjautuminen onnistui! Uudelleenohjattu: {resp2.url[:80]}...")
+    # 5. Pura koodi URL:sta
+    parsed = urllib.parse.urlparse(location)
+    fragment_qs = urllib.parse.parse_qs(parsed.fragment)
+    query_qs = urllib.parse.parse_qs(parsed.query)
     
-    # 4. Hae kulutusdata API:sta
+    code = fragment_qs.get("code", query_qs.get("code", [None]))[0]
+    if not code:
+        print("VIRHE: OIDC koodia ei löytynyt redirect-URL:sta!")
+        return None
+        
+    # 6. Vaihda koodi access tokeniin
+    token_url = "https://login.ecoreaction.fi/auth/realms/AanekoskenEnergia/protocol/openid-connect/token"
+    token_data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": verifier
+    }
+    
+    resp3 = session.post(token_url, data=token_data, timeout=30)
+    if resp3.status_code != 200:
+        print(f"VIRHE Tokenin haussa: {resp3.status_code} {resp3.text}")
+        return None
+        
+    tokens = resp3.json()
+    access_token = tokens.get("access_token")
+    if not access_token:
+        print("VIRHE: Access tokenia ei saatu.")
+        return None
+    
+    print("Kirjautuminen onnistui! Access token haettu.")
+    
+    # 7. Hae kulutusdata API:sta
     end = datetime.datetime.now(datetime.timezone.utc)
     start = end - datetime.timedelta(days=DAYS_TO_FETCH)
     start_str = start.strftime("%Y-%m-%dT00:00:00Z")
@@ -107,13 +161,13 @@ def fetch_api_data():
     )
     
     print(f"Haetaan dataa aikaväliltä {start_str} - {end_str}...")
-    resp3 = session.get(api_url, timeout=30)
+    resp4 = session.get(api_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
     
-    if resp3.status_code != 200:
-        print(f"Virhe datan haussa: {resp3.status_code} {resp3.text[:200]}")
+    if resp4.status_code != 200:
+        print(f"Virhe datan haussa: {resp4.status_code} {resp4.text[:200]}")
         return None
     
-    data = resp3.json()
+    data = resp4.json()
     print(f"Data haettu onnistuneesti! Data-pisteiden määrä: {len(data)}")
     return data
 
