@@ -2,18 +2,18 @@ ARG BUILD_FROM
 FROM $BUILD_FROM
 
 # Asennetaan tarvittavat ohjelmistot (Chromium on välttämätön Playwrightille)
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     chromium \
     jq \
-    python3 \
-    py3-pip
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 # Asennetaan Python-paketit
 RUN pip3 install --no-cache-dir playwright websockets requests --break-system-packages
 
-# Kerrotaan Playwrightille, että käytetään järjestelmän Chromiumia eikä ladata sen omaa
+# Kerrotaan Playwrightille, että käytetään järjestelmän Chromiumia
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Kopioidaan skriptit
 COPY run.sh /
