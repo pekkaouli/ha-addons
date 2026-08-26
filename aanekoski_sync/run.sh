@@ -1,6 +1,4 @@
 #!/bin/bash
-
 echo "Aloitetaan Äänekosken Energia Synkronointi -lisäosa..."
-
-# Ajetaan Python-skripti, joka itsessään lukee asetukset ja pyörii jatkuvasti
-python3 /aanekoski_sync.py
+echo "Versio: 1.2.1"
+exec python3 -u /aanekoski_sync.py 2>&1
