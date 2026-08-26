@@ -159,16 +159,19 @@ async def main():
             # Nukutaan 30 sekuntia ja tarkistetaan aika uudelleen
             await asyncio.sleep(30)
 
-if __name__ == "__main__":
-    # Ajetaan ensimmäisen kerran heti käynnistyessä
+async def startup():
+    """Ajetaan ensin kerran heti ja sitten siirrytään ajastettuun tilaan."""
     print("Ajetaan ensimmäinen synkronointi käynnistyksen yhteydessä...")
     try:
-        loop = asyncio.get_event_loop()
-        data = loop.run_until_complete(fetch_api_data())
-        loop.run_until_complete(push_to_ha(data))
+        data = await fetch_api_data()
+        await push_to_ha(data)
     except Exception as e:
-         print(f"Virhe ensimmäisessä ajossa: {e}")
+        print(f"Virhe ensimmäisessä ajossa: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # Käynnistetään loputon looppi
     print(f"Siirrytään ajastettuun tilaan. Seuraava ajo päivittäin klo {RUN_HOUR}:{RUN_MINUTE}.")
-    asyncio.run(main())
+    await main()
+
+if __name__ == "__main__":
+    asyncio.run(startup())
