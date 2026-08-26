@@ -1,0 +1,25 @@
+name: "Äänekosken Energia Synkronointi"
+description: "Hakee sähkönkulutuksen Äänekosken Energian portaalista Home Assistantiin."
+version: "1.0.0"
+slug: "aanekoski_sync"
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armv7
+startup: application
+boot: auto
+map:
+  - config:rw
+options:
+  email: "sahkoposti@example.com"
+  password: "OmaSalasana"
+  days_to_fetch: 7
+  run_hour: "12"
+  run_minute: "00"
+schema:
+  email: str
+  password: password
+  days_to_fetch: int
+  run_hour: str
+  run_minute: str
