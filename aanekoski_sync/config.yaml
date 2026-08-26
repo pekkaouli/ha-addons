@@ -1,6 +1,6 @@
 name: "Äänekosken Energia Synkronointi"
 description: "Hakee sähkönkulutuksen Äänekosken Energian portaalista Home Assistantiin."
-version: "1.0.0"
+version: "1.0.1"
 slug: "aanekoski_sync"
 init: false
 arch:
