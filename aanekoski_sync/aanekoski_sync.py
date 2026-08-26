@@ -22,8 +22,9 @@ DAYS_TO_FETCH = int(options.get("days_to_fetch", 7))
 RUN_HOUR = options.get("run_hour", "12")
 RUN_MINUTE = options.get("run_minute", "00")
 
-# Supervisorin kautta yhdistäminen suoraan Home Assistantiin
-HA_URL = "ws://supervisor/core/api/websocket"
+# Home Assistantin sisäinen osoite add-on ympäristössä
+HA_WS_URL = "ws://homeassistant:8123/api/websocket"
+HA_REST_URL = "http://supervisor/core/api"
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 
 async def fetch_api_data():
@@ -109,31 +110,64 @@ async def push_to_ha(data):
         print("VIRHE: SUPERVISOR_TOKEN puuttuu. Varmista, että ajat skriptiä Add-on ympäristössä.")
         return
 
-    async with websockets.connect(HA_URL) as ws:
-        # 1. Auth
-        auth_req = await ws.recv()
-        await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
-        auth_resp = await ws.recv()
-        print("HA Auth:", auth_resp)
+    payload = {
+        "metadata": {
+            "has_mean": False,
+            "has_sum": True,
+            "name": "Äänekosken Energia Kulutus",
+            "source": "recorder",
+            "statistic_id": "sensor.aanekosken_energia_kulutus",
+            "unit_of_measurement": "kWh"
+        },
+        "stats": stats
+    }
+
+    # Käytetään WebSocket-yhteyttä suoraan Home Assistantiin
+    try:
+        async with websockets.connect(HA_WS_URL) as ws:
+            # 1. Auth
+            auth_req = await ws.recv()
+            print(f"WS auth request: {auth_req}")
+            await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
+            auth_resp = await ws.recv()
+            auth_data = json.loads(auth_resp)
+            print(f"WS auth response: {auth_resp}")
+            
+            if auth_data.get("type") != "auth_ok":
+                print(f"VIRHE: Tunnistautuminen epäonnistui: {auth_resp}")
+                return
+            
+            # 2. Import statistics
+            ws_payload = {"id": 1, "type": "recorder/import_statistics", **payload}
+            await ws.send(json.dumps(ws_payload))
+            
+            try:
+                resp = await asyncio.wait_for(ws.recv(), timeout=30)
+                print(f"HA Import Response: {resp}")
+            except asyncio.TimeoutError:
+                print("Varoitus: Vastauksen odotus aikakatkaistiin, mutta data on todennäköisesti tuotu.")
+            except websockets.exceptions.ConnectionClosed:
+                print("Yhteys sulkeutui, mutta data on todennäköisesti tuotu onnistuneesti.")
+    except Exception as e:
+        print(f"WebSocket-yhteys epäonnistui: {e}")
+        print("Yritetään REST API:n kautta...")
         
-        # 2. Import statistics
-        msg_id = 1
-        payload = {
-            "id": msg_id,
-            "type": "recorder/import_statistics",
-            "metadata": {
-                "has_mean": False,
-                "has_sum": True,
-                "name": "Äänekosken Energia Kulutus",
-                "source": "recorder",
-                "statistic_id": "sensor.aanekosken_energia_kulutus",
-                "unit_of_measurement": "kWh"
+        # Fallback: REST API Supervisorin kautta
+        import urllib.request
+        req = urllib.request.Request(
+            f"{HA_REST_URL}/services/recorder/import_statistics",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": f"Bearer {HA_TOKEN}",
+                "Content-Type": "application/json"
             },
-            "stats": stats
-        }
-        await ws.send(json.dumps(payload))
-        resp = await ws.recv()
-        print("HA Import Response:", resp)
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                print(f"REST API vastaus: {resp.status} {resp.read().decode()}")
+        except Exception as rest_err:
+            print(f"REST API myös epäonnistui: {rest_err}")
 
 async def main():
     print("Äänekosken Energia -lisäosa käynnistetty.")
