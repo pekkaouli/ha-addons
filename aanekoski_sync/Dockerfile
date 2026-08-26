@@ -1,15 +1,13 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM python:3.12-slim-bookworm
 
 # Asennetaan tarvittavat ohjelmistot (Chromium on välttämätön Playwrightille)
 RUN apt-get update && apt-get install -y \
     chromium \
     jq \
-    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Asennetaan Python-paketit
-RUN pip3 install --no-cache-dir playwright websockets requests --break-system-packages
+RUN pip3 install --no-cache-dir playwright websockets requests
 
 # Kerrotaan Playwrightille, että käytetään järjestelmän Chromiumia
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
