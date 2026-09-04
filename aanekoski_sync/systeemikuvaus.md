@@ -8,7 +8,7 @@ Lisäosa toimii taustalla omana Docker-konttinaan Home Assistant -palvelimella j
 ## Arkkitehtuuri
 Järjestelmä on rakennettu Home Assistantin Add-on -arkkitehtuurin mukaisesti. Se koostuu seuraavista päätiedostoista:
 
-* **`config.yaml`**: Määrittelee lisäosan metatiedot, käyttöoikeudet (Home Assistant API) ja käyttäjän konfiguroitavat asetukset (sähköposti, salasana, historian alkupäivä ja ajastuksen kellonaika).
+* **`config.yaml`**: Määrittelee lisäosan metatiedot, käyttöoikeudet (Home Assistant API) ja käyttäjän konfiguroitavat asetukset (sähköposti, salasana, käyttöpaikkatunnus, historian alkupäivä ja ajastuksen kellonaika).
 * **`Dockerfile`**: Kertoo Home Assistantille, miten lisäosan virtuaalinen ympäristö (Docker-kontti) rakennetaan (esim. asennetaan Python ja tarvittavat kirjastot).
 * **`run.sh`**: Käynnistysskripti, joka suoritetaan kun kontti käynnistyy. Käynnistää varsinaisen Python-ohjelman.
 * **`aanekoski_sync.py`**: Järjestelmän sydän. Sisältää kaiken varsinaisen toimintalogiikan.
@@ -32,7 +32,7 @@ Kun tunnistautuminen on valmis ja `access_token` on saatu:
 * Ohjelma hakee **koko historian** asetuksissa määritellystä alkupäivästä (`start_date`) tähän päivään, kalenterivuosi kerrallaan.
 * Koko historia haetaan joka ajolla tarkoituksella: kumulatiivinen summa on laskettava aina samasta origosta, muuten Home Assistantin tilastot menevät sekaisin (ks. Tunnetut sudenkuopat).
 * Se tekee HTTP GET -pyynnön Äänekosken Energian API:in (`/api/meteringPoints/ELECTRICITY/.../series`).
-* Pyyntö kohdistuu koodiin määriteltyyn käyttöpaikkaan (METERING_POINT) ja pyytää sähkönkulutustietoja tuntiresoluutiolla.
+* Pyyntö kohdistuu asetuksissa määriteltyyn käyttöpaikkaan (`metering_point`) ja pyytää sähkönkulutustietoja tuntiresoluutiolla. Käyttöpaikkatunnus löytyy portaalista kohdasta Käyttöpaikat.
 * Palvelin palauttaa tiedot JSON-muodossa. Huom: API **ei palauta `timestamp`-kenttää** (se on aina `null`) - aika luetaan erillisistä kentistä `year` / `month` / `day` / `hour`. Rivit joilta `hour` puuttuu ovat päiväaggregaatteja ja ne ohitetaan.
 
 ### 4. Datan tuonti Home Assistantiin (WebSocket)

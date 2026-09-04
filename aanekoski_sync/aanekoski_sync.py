@@ -26,6 +26,7 @@ PASSWORD = options.get("password", "")
 START_DATE_RAW = options.get("start_date", "2021-07-01")
 RUN_HOUR = options.get("run_hour", "12")
 RUN_MINUTE = options.get("run_minute", "00")
+METERING_POINT = str(options.get("metering_point", "")).strip()
 
 # Home Assistantin sisäinen osoite add-on ympäristössä
 HA_WS_URL = "ws://supervisor/core/api/websocket"
@@ -33,7 +34,6 @@ HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 
 # Keycloak login asetukset
 LOGIN_START_URL = "https://aanekoskenenergia.ecoreaction.fi/online/tracking"
-ELEC_MP = "KAYTTOPAIKKATUNNUS"
 PRODUCT = "EL_ENERGY_CONSUMPTION"
 STATISTIC_ID = "sensor.aanekosken_energia_kulutus"
 
@@ -240,7 +240,7 @@ def fetch_series(session, access_token, start_day, end_day):
     """Hakee yhden aikavälin tuntisarjan."""
     api_url = (
         f"https://aanekoskenenergia.ecoreaction.fi/api/meteringPoints/ELECTRICITY/"
-        f"{ELEC_MP}/series"
+        f"{METERING_POINT}/series"
     )
     params = {
         "products": PRODUCT,
@@ -268,6 +268,10 @@ def fetch_api_data():
     Koko historia haetaan joka ajolla, jotta kumulatiivinen sum lasketaan
     aina samasta origosta - muuten HA:n tilastot menevät sekaisin.
     """
+    if not METERING_POINT:
+        print("VIRHE: Käyttöpaikkatunnus (metering_point) puuttuu asetuksista!")
+        return None
+
     session, access_token = login()
     if not access_token:
         return None
@@ -398,6 +402,12 @@ async def main():
     print("Äänekosken Energia -lisäosa käynnistetty.")
     if not EMAIL or not PASSWORD:
         print("VIRHE: Sähköpostia tai salasanaa ei ole asetettu asetuksissa!")
+        return
+    if not METERING_POINT:
+        print(
+            "VIRHE: Käyttöpaikkatunnus (metering_point) puuttuu asetuksista!\n"
+            "       Löydät sen portaalista kohdasta Käyttöpaikat."
+        )
         return
 
     while True:
