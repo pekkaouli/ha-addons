@@ -1,7 +1,7 @@
 FROM python:3.12-slim-bookworm
 
 # Asennetaan vain Python-paketit (ei enää Chromiumia!)
-RUN pip3 install --no-cache-dir websockets requests
+RUN pip3 install --no-cache-dir websockets requests tzdata
 
 # Kopioidaan skriptit
 COPY run.sh /
