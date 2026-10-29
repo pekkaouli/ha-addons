@@ -28,6 +28,23 @@ RUN_HOUR = options.get("run_hour", "12")
 RUN_MINUTE = options.get("run_minute", "00")
 METERING_POINT = str(options.get("metering_point", "")).strip()
 
+# Hinnoittelu (snt/kWh, sis. ALV 25,5 %). Kaikki asetuksista, oletukset
+# Aanekosken Energian hinnastosta 19.10.2026 ja helmikuun laskurista.
+def _f(avain, oletus):
+    try: return float(options.get(avain, oletus))
+    except (TypeError, ValueError): return float(oletus)
+
+MARGINAALI      = _f("margin", 0.40)          # porssisahkon myyntimarginaali, sis. ALV
+ALV_KERROIN     = 1.0 + _f("vat_percent", 25.5) / 100.0  # porssihinta on veroton
+SIIRTO_PAIVA    = _f("transfer_day", 4.20)
+SIIRTO_YO       = _f("transfer_night", 2.00)
+SAHKOVERO       = _f("tax", 2.83)
+HINTA_YLEIS     = _f("price_yleissahko", 10.50)
+HINTA_AIKA_PV   = _f("price_aikasahko_day", 11.50)
+HINTA_AIKA_YO   = _f("price_aikasahko_night", 9.40)
+
+PAIVA_ALKAA, PAIVA_PAATTYY = 7, 22            # siirron ja aikasahkon paivaraja
+
 # Home Assistantin sisäinen osoite add-on ympäristössä
 HA_WS_URL = "ws://supervisor/core/api/websocket"
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
@@ -36,6 +53,17 @@ HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 LOGIN_START_URL = "https://aanekoskenenergia.ecoreaction.fi/online/tracking"
 PRODUCT = "EL_ENERGY_CONSUMPTION"
 STATISTIC_ID = "sensor.aanekosken_energia_kulutus"
+
+# Spot-hintasarja samasta portaalista (parametrit vanhasta fetch_data.py:sta)
+SPOT_TYPE    = "PRICE"
+SPOT_NUMBER  = "SPOT_PRICE#NPSPOT"
+SPOT_PRODUCT = "PRICE"
+
+# Kustannussarjat ulkoisina tilastoina. Kaksoispiste-muotoinen tunniste ei voi
+# tormata entiteettiin - juuri se torma rikkoi kulutustilaston syksylla.
+KUST_SPOT   = "aanekoski_sync:kustannus_spot"
+KUST_YLEIS  = "aanekoski_sync:kustannus_yleissahko"
+KUST_AIKA   = "aanekoski_sync:kustannus_aikasahko"
 
 LOCAL_TZ = ZoneInfo("Europe/Helsinki")
 
@@ -117,9 +145,9 @@ def parse_item_time(item):
         return None
 
 
-def parse_item_value(item):
+def parse_item_value(item, product=None):
     values = item.get("values") or {}
-    entry = values.get(f"{PRODUCT}#0")
+    entry = values.get(f"{product or PRODUCT}#0")
     if not isinstance(entry, dict):
         entry = next(iter(values.values()), None)
     if not isinstance(entry, dict):
@@ -236,14 +264,18 @@ def _iso_bound(day, end_of_day=False):
     return datetime.datetime.combine(day, time_part, tzinfo=LOCAL_TZ).isoformat()
 
 
-def fetch_series(session, access_token, start_day, end_day):
-    """Hakee yhden aikavälin tuntisarjan."""
+def fetch_series(session, access_token, start_day, end_day,
+                 mtype="ELECTRICITY", mnumber=None, product=None, label="Kulutus"):
+    """Hakee yhden aikavälin tuntisarjan. Sama rajapinta palvelee sekä
+    kulutusta (ELECTRICITY) että spot-hintaa (PRICE)."""
+    mnumber = mnumber if mnumber is not None else METERING_POINT
+    product = product if product is not None else PRODUCT
     api_url = (
-        f"https://aanekoskenenergia.ecoreaction.fi/api/meteringPoints/ELECTRICITY/"
-        f"{METERING_POINT}/series"
+        f"https://aanekoskenenergia.ecoreaction.fi/api/meteringPoints/{mtype}/"
+        f"{requests.utils.quote(mnumber, safe='')}/series"
     )
     params = {
-        "products": PRODUCT,
+        "products": product,
         "resolution": "DAYS_AS_HOURS",
         "startDate": _iso_bound(start_day),
         "endDate": _iso_bound(end_day, end_of_day=True),
@@ -255,10 +287,10 @@ def fetch_series(session, access_token, start_day, end_day):
         timeout=120,
     )
     if resp.status_code != 200:
-        print(f"  {start_day} - {end_day}: VIRHE {resp.status_code} {resp.text[:200]}")
+        print(f"  {label} {start_day} - {end_day}: VIRHE {resp.status_code} {resp.text[:160]}")
         return []
     rows = resp.json()
-    print(f"  {start_day} - {end_day}: {len(rows)} riviä")
+    print(f"  {label} {start_day} - {end_day}: {len(rows)} riviä")
     return rows
 
 
@@ -282,46 +314,138 @@ def fetch_api_data():
         print(f"VIRHE: start_date {start_date} on tulevaisuudessa.")
         return None
 
-    print(f"Haetaan kulutushistoria {start_date} - {today} (kalenterivuosittain)...")
+    print(f"Haetaan kulutus ja spot-hinta {start_date} - {today} (kalenterivuosittain)...")
 
-    data = []
+    kulutus, spot = [], []
     for year in range(start_date.year, today.year + 1):
-        chunk_start = max(start_date, datetime.date(year, 1, 1))
-        chunk_end = min(today, datetime.date(year, 12, 31))
-        data.extend(fetch_series(session, access_token, chunk_start, chunk_end))
+        a = max(start_date, datetime.date(year, 1, 1))
+        b = min(today, datetime.date(year, 12, 31))
+        kulutus.extend(fetch_series(session, access_token, a, b, label="Kulutus"))
+        spot.extend(fetch_series(session, access_token, a, b,
+                                 mtype=SPOT_TYPE, mnumber=SPOT_NUMBER,
+                                 product=SPOT_PRODUCT, label="Spot   "))
 
-    print(f"Data haettu onnistuneesti! Rivejä yhteensä: {len(data)}")
-    return data
+    print(f"Haettu: kulutus {len(kulutus)} riviä, spot {len(spot)} riviä")
+    return {"kulutus": kulutus, "spot": spot}
 
 
-def build_stats(data):
-    """Muuntaa API-rivit HA:n tilastoformaattiin kumulatiivisella summalla."""
-    hourly = {}
-    skipped = 0
-    for item in data:
+def tunneittain(rows, product=None, nimi=""):
+    """API-rivit -> {aika: arvo}. Sama tunti useasta hausta: viimeisin voittaa."""
+    hourly, skipped = {}, 0
+    for item in rows:
         ts = parse_item_time(item)
-        value = parse_item_value(item)
+        value = parse_item_value(item, product)
         if ts is None or value is None:
             skipped += 1
             continue
-        # Sama tunti voi tulla useasta hausta - viimeisin voittaa
         hourly[ts] = value
-
     if skipped:
-        print(f"Ohitettiin {skipped} riviä (ei tuntia tai ei arvoa).")
+        print(f"  {nimi}: ohitettiin {skipped} riviä (ei tuntia tai ei arvoa)")
+    return hourly
 
-    stats = []
-    sum_kwh = 0.0
+
+def kumulatiivinen(hourly, pyoristys=3):
+    """{aika: arvo} -> HA:n tilastoformaatti kumulatiivisella summalla."""
+    stats, summa = [], 0.0
     for ts in sorted(hourly):
-        sum_kwh += hourly[ts]
-        stats.append(
-            {
-                "start": ts.isoformat(),
-                "state": hourly[ts],
-                "sum": round(sum_kwh, 3),
-            }
-        )
+        summa += hourly[ts]
+        stats.append({"start": ts.isoformat(),
+                      "state": round(hourly[ts], pyoristys),
+                      "sum": round(summa, pyoristys)})
     return stats
+
+
+def on_paiva(ts):
+    """Siirron ja aikasähkön päiväaika 07-22 paikallista aikaa."""
+    return PAIVA_ALKAA <= ts.astimezone(LOCAL_TZ).hour < PAIVA_PAATTYY
+
+
+def build_stats(data):
+    """Kulutustilasto (kWh) - säilytetty nimi yhteensopivuuden vuoksi."""
+    return kumulatiivinen(tunneittain(data, PRODUCT, "kulutus"))
+
+
+def build_cost_stats(kwh_tunnit, spot_tunnit):
+    """Kolme kustannussarjaa samasta kulutuksesta, EUR per tunti.
+
+    Jokaiseen lisätään sama siirto ja sähkövero, joten Energia-paneelin luku on
+    rehellinen ja sarjat ovat keskenään vertailukelpoisia. Perusmaksut jätetään
+    pois - ne eivät ole kWh-sidonnaisia eivätkä kuulu tuntitilastoon.
+    """
+    spot_puuttuu = 0
+    sarjat = {KUST_SPOT: {}, KUST_YLEIS: {}, KUST_AIKA: {}}
+    for ts, kwh in kwh_tunnit.items():
+        paiva = on_paiva(ts)
+        siirto = SIIRTO_PAIVA if paiva else SIIRTO_YO
+        kiintea_osa = siirto + SAHKOVERO
+
+        spot = spot_tunnit.get(ts)
+        if spot is None:
+            spot_puuttuu += 1
+        else:
+            # Portaali palauttaa veroton EUR/MWh -> snt/kWh sis. ALV
+            spot_snt = spot / 10.0 * ALV_KERROIN
+            sarjat[KUST_SPOT][ts] = kwh * (spot_snt + MARGINAALI + kiintea_osa) / 100.0
+
+        sarjat[KUST_YLEIS][ts] = kwh * (HINTA_YLEIS + kiintea_osa) / 100.0
+        aika_hinta = HINTA_AIKA_PV if paiva else HINTA_AIKA_YO
+        sarjat[KUST_AIKA][ts] = kwh * (aika_hinta + kiintea_osa) / 100.0
+
+    if spot_puuttuu:
+        print(f"  spot-hinta puuttui {spot_puuttuu} tunnilta - ne jätetään spot-sarjasta pois")
+    return {sid: kumulatiivinen(h, 4) for sid, h in sarjat.items()}
+
+
+async def laheta_tilastot(sarjat):
+    """sarjat: lista (metadata, stats). Tuo kaikki yhdellä WebSocket-yhteydellä."""
+    if not HA_TOKEN:
+        print("VIRHE: SUPERVISOR_TOKEN puuttuu!")
+        return False
+    try:
+        async with websockets.connect(HA_WS_URL, max_size=None) as ws:
+            await ws.recv()
+            await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
+            vastaus = await ws.recv()
+            if json.loads(vastaus).get("type") != "auth_ok":
+                print(f"VIRHE: Tunnistautuminen epäonnistui! {vastaus}")
+                return False
+            print("WebSocket-tunnistautuminen ok.")
+
+            viesti_id = 1
+            for metadata, stats in sarjat:
+                if not stats:
+                    print(f"  {metadata['statistic_id']}: ei dataa, ohitetaan")
+                    continue
+                yks = metadata.get("unit_of_measurement")
+                print(f"  {metadata['statistic_id']}: {len(stats)} pistettä, "
+                      f"yhteensä {stats[-1]['sum']} {yks}")
+                for kohta in range(0, len(stats), IMPORT_CHUNK_SIZE):
+                    era = stats[kohta:kohta + IMPORT_CHUNK_SIZE]
+                    await ws.send(json.dumps({"id": viesti_id,
+                                              "type": "recorder/import_statistics",
+                                              "metadata": metadata, "stats": era}))
+                    try:
+                        r = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+                    except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
+                        print(f"    erä {viesti_id}: yhteys katkesi/aikakatkaisu: {e}")
+                        return False
+                    if not r.get("success"):
+                        print(f"    erä {viesti_id}: VIRHE {r.get('error')}")
+                        return False
+                    viesti_id += 1
+            print("Tilastojen tuonti valmis.")
+            return True
+    except Exception as e:
+        print(f"WebSocket-yhteys epäonnistui: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def _kust_meta(sid, nimi):
+    return {"has_mean": False, "has_sum": True, "name": nimi,
+            "source": sid.split(":")[0], "statistic_id": sid,
+            "unit_of_measurement": "EUR"}
 
 
 async def push_to_ha(data):
@@ -329,68 +453,25 @@ async def push_to_ha(data):
         print("Ei dataa lähetettäväksi.")
         return
 
-    stats = build_stats(data)
-    if not stats:
-        print("Datan parsiminen ei tuottanut tuloksia.")
+    kwh_tunnit  = tunneittain(data.get("kulutus", []), PRODUCT, "kulutus")
+    spot_tunnit = tunneittain(data.get("spot", []), SPOT_PRODUCT, "spot")
+    if not kwh_tunnit:
+        print("Kulutusdatan parsiminen ei tuottanut tuloksia.")
         return
+    print(f"Tunteja: kulutus {len(kwh_tunnit)}, spot {len(spot_tunnit)}")
 
-    print(
-        f"Lähetetään {len(stats)} datapistettä Home Assistantiin "
-        f"({stats[0]['start']} - {stats[-1]['start']}, yhteensä {stats[-1]['sum']} kWh)..."
-    )
+    kulutus_stats = kumulatiivinen(kwh_tunnit)
+    kustannukset = build_cost_stats(kwh_tunnit, spot_tunnit)
 
-    if not HA_TOKEN:
-        print("VIRHE: SUPERVISOR_TOKEN puuttuu!")
-        return
-
-    metadata = {
-        "has_mean": False,
-        "has_sum": True,
-        "name": "Äänekosken Energia Kulutus",
-        "source": "recorder",
-        "statistic_id": STATISTIC_ID,
-        "unit_of_measurement": "kWh",
-    }
-
-    try:
-        async with websockets.connect(HA_WS_URL, max_size=None) as ws:
-            # 1. Auth
-            await ws.recv()
-            await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
-            auth_resp = await ws.recv()
-            if json.loads(auth_resp).get("type") != "auth_ok":
-                print(f"VIRHE: Tunnistautuminen epäonnistui! {auth_resp}")
-                return
-            print("WebSocket-tunnistautuminen ok.")
-
-            # 2. Import statistics paloissa
-            message_id = 1
-            for offset in range(0, len(stats), IMPORT_CHUNK_SIZE):
-                chunk = stats[offset : offset + IMPORT_CHUNK_SIZE]
-                await ws.send(
-                    json.dumps(
-                        {
-                            "id": message_id,
-                            "type": "recorder/import_statistics",
-                            "metadata": metadata,
-                            "stats": chunk,
-                        }
-                    )
-                )
-                try:
-                    resp = await asyncio.wait_for(ws.recv(), timeout=60)
-                    print(f"  Erä {message_id} ({len(chunk)} pistettä): {resp}")
-                except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
-                    print(f"  Erä {message_id}: yhteys katkesi/aikakatkaisu: {e}")
-                    return
-                message_id += 1
-
-            print("Tilastojen tuonti valmis.")
-    except Exception as e:
-        print(f"WebSocket-yhteys epäonnistui: {e}")
-        import traceback
-
-        traceback.print_exc()
+    sarjat = [
+        ({"has_mean": False, "has_sum": True,
+          "name": "Äänekosken Energia Kulutus", "source": "recorder",
+          "statistic_id": STATISTIC_ID, "unit_of_measurement": "kWh"}, kulutus_stats),
+        (_kust_meta(KUST_SPOT,  "Sähkö: toteutunut (pörssi)"),   kustannukset[KUST_SPOT]),
+        (_kust_meta(KUST_YLEIS, "Sähkö: vertailu Yleissähkö"),   kustannukset[KUST_YLEIS]),
+        (_kust_meta(KUST_AIKA,  "Sähkö: vertailu Aikasähkö"),    kustannukset[KUST_AIKA]),
+    ]
+    await laheta_tilastot(sarjat)
 
 
 async def sync_once():
